@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import requests
 import urllib3
 
+from execution_log import log_execution
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -53,6 +55,9 @@ class Config:
     api_key: str | None
     require_auth: bool
     timeout_seconds: float
+    temperature: float
+    num_predict: int
+    top_p: float
 
 
 def load_configuration(environ: dict | None = None) -> Config:
@@ -68,9 +73,13 @@ def load_configuration(environ: dict | None = None) -> Config:
 
     try:
         timeout_seconds = float(env.get("OLLAMA_TIMEOUT", "300"))
-    except ValueError as exc:
+        temperature = float(env.get("OLLAMA_TEMPERATURE", "0.1"))
+        num_predict = int(env.get("OLLAMA_NUM_PREDICT", "100"))
+        top_p = float(env.get("OLLAMA_TOP_P", "1.0"))
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(
-            "OLLAMA_TIMEOUT deve ser um número que representa os segundos."
+            "OLLAMA_TIMEOUT, OLLAMA_TEMPERATURE, OLLAMA_NUM_PREDICT e OLLAMA_TOP_P "
+            "devem conter números válidos."
         ) from exc
 
     if not host:
@@ -83,12 +92,21 @@ def load_configuration(environ: dict | None = None) -> Config:
         raise ConfigurationError("OLLAMA_MODEL está vazio.")
     if timeout_seconds <= 0:
         raise ConfigurationError("OLLAMA_TIMEOUT deve ser maior que zero.")
+    if not 0.0 <= temperature <= 2.0:
+        raise ConfigurationError("OLLAMA_TEMPERATURE deve estar entre 0 e 2.")
+    if num_predict <= 0:
+        raise ConfigurationError("OLLAMA_NUM_PREDICT deve ser maior que zero.")
+    if not 0.0 <= top_p <= 1.0:
+        raise ConfigurationError("OLLAMA_TOP_P deve estar entre 0 e 1.")
     if require_auth and not api_key:
         raise AuthenticationError(
             "Autenticação solicitada, mas OLLAMA_API_KEY não foi configurada."
         )
 
-    return Config(host, model, api_key, require_auth, timeout_seconds)
+    return Config(
+        host, model, api_key, require_auth, timeout_seconds,
+        temperature, num_predict, top_p
+    )
 
 
 def capture_text(input_function=input) -> str:
@@ -125,7 +143,11 @@ def prepare_chat_request(config: Config, text: str) -> dict:
             {"role": "user", "content": text},
         ],
         "stream": False,
-        "options": {"temperature": 0.1},
+        "options": {
+            "temperature": config.temperature,
+            "num_predict": config.num_predict,
+            "top_p": config.top_p,
+        },
     }
 
 
@@ -226,6 +248,7 @@ def main() -> int:
         response_payload = call_llm(config, payload)
         result = parse_response(response_payload)
         present_result(result)
+        log_execution("chat", model=config.model, status="success")
         return 0
     except (
         ConfigurationError,
@@ -235,9 +258,12 @@ def main() -> int:
         CommunicationError,
         ResponseFormatError,
     ) as exc:
+        error_name = exc.__class__.__name__
+        log_execution(error_name, status="error")
         print(f"Erro: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        log_execution("KeyboardInterrupt", status="cancelled")
         print("\nOperação cancelada pelo usuário.", file=sys.stderr)
         return 130
 

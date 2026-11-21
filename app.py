@@ -7,10 +7,14 @@ import requests
 import streamlit as st
 import urllib3
 
+from execution_log import log_execution
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://llm-internal.softex:9001").rstrip("/")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip() or None
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "300"))
 PERSISTENT_DIR = Path("/persistent")
 HISTORY_FILE = PERSISTENT_DIR / "historico.json"
 DEFAULT_MODEL = "qwen3.5"
@@ -97,7 +101,11 @@ def fetch_models() -> list:
     return [DEFAULT_MODEL]
 
 
-def analyze_text(model: str, text: str) -> str:
+def analyze_text(model: str, text: str, temperature: float = 0.1, num_predict: int = 50, top_p: float = 1.0) -> str:
+    headers = {"Content-Type": "application/json"}
+    if OLLAMA_API_KEY:
+        headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+
     response = requests.post(
         f"{OLLAMA_HOST}/api/chat",
         json={
@@ -107,10 +115,15 @@ def analyze_text(model: str, text: str) -> str:
                 {"role": "user", "content": text},
             ],
             "stream": False,
-            "options": {"temperature": 0.1},
+            "options": {
+                "temperature": temperature,
+                "num_predict": num_predict,
+                "top_p": top_p,
+            },
         },
+        headers=headers,
         verify=False,
-        timeout=300,
+        timeout=OLLAMA_TIMEOUT,
     )
     response.raise_for_status()
     payload = response.json()
@@ -129,6 +142,9 @@ with st.sidebar:
     default_index = models.index(DEFAULT_MODEL) if DEFAULT_MODEL in models else 0
     model = st.selectbox("Modelo Ollama", models, index=default_index)
     st.caption(f"Servidor: `{OLLAMA_HOST}`")
+    temperature = st.slider("Temperatura", 0.0, 1.0, 0.1, 0.01)
+    num_predict = st.slider("Limite de tokens", 1, 500, 50)
+    top_p = st.slider("Top P", 0.0, 1.0, 1.0, 0.01)
 
 col_input, col_output = st.columns(2, gap="large")
 
@@ -152,7 +168,7 @@ with col_output:
         else:
             with st.spinner("Processando com o Ollama..."):
                 try:
-                    result = analyze_text(model, source_text)
+                    result = analyze_text(model, source_text, temperature, num_predict, top_p)
                     if not result:
                         raise RuntimeError("O modelo não retornou conteúdo.")
                     st.session_state.result_markdown = result
@@ -164,11 +180,14 @@ with col_output:
                             "result": result,
                         }
                     )
+                    log_execution("chat", model=model, status="success")
                     if not saved:
                         st.warning("Não foi possível salvar esta análise no histórico persistente.")
                 except requests.RequestException as exc:
+                    log_execution("CommunicationError", model=model, status="error")
                     st.error(f"Falha ao comunicar com o Ollama: {exc}")
                 except (ValueError, RuntimeError) as exc:
+                    log_execution(exc.__class__.__name__, model=model, status="error")
                     st.error(str(exc))
 
     if st.session_state.result_markdown:

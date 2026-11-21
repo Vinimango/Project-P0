@@ -4,5 +4,5 @@ __pycache__/
 venv/
 *.log
 *.tmp
-.pytest_cache/
+*.tar
 .persistent/

@@ -125,9 +125,43 @@ def analyze_text(model: str, text: str, temperature: float = 0.1, num_predict: i
         verify=False,
         timeout=OLLAMA_TIMEOUT,
     )
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("message", {}).get("content", "").strip()
+
+    if response.status_code in (401, 403):
+        raise RuntimeError("A credencial foi rejeitada pelo Ollama. Verifique OLLAMA_API_KEY.")
+    if response.status_code == 404:
+        try:
+            server_message = response.json().get("error", "")
+        except ValueError:
+            server_message = ""
+        detail = f" Detalhe: {server_message}" if server_message else ""
+        raise RuntimeError(
+            f"O Ollama não encontrou o endpoint ou o modelo '{model}'. "
+            f"Selecione um modelo disponível na barra lateral.{detail}"
+        )
+    if response.status_code == 429:
+        raise RuntimeError("O Ollama está limitando solicitações. Aguarde e tente novamente.")
+    if response.status_code >= 500:
+        raise RuntimeError("O serviço Ollama está indisponível no momento. Tente novamente mais tarde.")
+
+    try:
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException:
+        raise RuntimeError(
+            f"O Ollama rejeitou a solicitação com o status HTTP {response.status_code}."
+        )
+    except ValueError:
+        raise RuntimeError("O Ollama respondeu, mas o formato da resposta não é JSON válido.")
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("O Ollama respondeu em formato inesperado.")
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("A resposta do Ollama não contém o campo 'message' esperado.")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("O modelo respondeu, mas o conteúdo está vazio.")
+    return content.strip()
 
 
 ensure_persistent_storage()

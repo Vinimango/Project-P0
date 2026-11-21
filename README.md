@@ -30,13 +30,13 @@ pip install -r requirements.txt
 
 O programa lê variáveis de ambiente. Não coloque credenciais reais no repositório.
 
-| Variável | Obrigatória | Padrão | Finalidade |
-|---|---:|---|---|
-| `OLLAMA_HOST` | Não | `https://llm-internal.softex:9001` | Endereço base do Ollama |
-| `OLLAMA_MODEL` | Não | `qwen3.5` | Modelo usado na chamada |
-| `OLLAMA_TIMEOUT` | Não | `300` | Timeout em segundos |
-| `OLLAMA_REQUIRE_AUTH` | Não | `false` | Exige `OLLAMA_API_KEY` localmente |
-| `OLLAMA_API_KEY` | Apenas se exigida | vazio | Credencial opcional enviada como Bearer |
+| Variável              |       Obrigatória | Padrão                             | Finalidade                              |
+| --------------------- | ----------------: | ---------------------------------- | --------------------------------------- |
+| `OLLAMA_HOST`         |               Não | `https://llm-internal.softex:9001` | Endereço base do Ollama                 |
+| `OLLAMA_MODEL`        |               Não | `qwen3.5`                          | Modelo usado na chamada                 |
+| `OLLAMA_TIMEOUT`      |               Não | `300`                              | Timeout em segundos                     |
+| `OLLAMA_REQUIRE_AUTH` |               Não | `false`                            | Exige `OLLAMA_API_KEY` localmente       |
+| `OLLAMA_API_KEY`      | Apenas se exigida | vazio                              | Credencial opcional enviada como Bearer |
 
 Exemplo PowerShell:
 
@@ -73,15 +73,19 @@ Ana verifica a integração com o sistema.
 
 ```markdown
 # Resumo Executivo
+
 Foi definida a preparação e o lançamento de um formulário.
 
 # Pontos-chave
+
 - Participantes: Ana e Carlos
 
 # Decisões tomadas
+
 - O formulário será lançado até sexta-feira
 
 # Lista de tarefas
+
 - [ ] Carlos — enviar o texto — até quarta-feira
 - [ ] Ana — verificar a integração com o sistema — prazo não informado
 ```
@@ -159,3 +163,64 @@ Consulte `BUILD_AND_DEPLOY.md` para build, exportação da imagem e configuraç�
 
 - `requests`: chamadas HTTP ao Ollama
 - `streamlit`: interface web opcional
+
+## Parâmetros avançados da geração
+
+Os parâmetros seguintes podem ser alterados sem modificar o núcleo da aplicação:
+
+| Variável             | Padrão | Limite                 | Uso                                 |
+| -------------------- | -----: | ---------------------- | ----------------------------------- |
+| `OLLAMA_TEMPERATURE` |  `0.1` | `0.0` a `2.0`          | Controle de aleatoriedade           |
+| `OLLAMA_NUM_PREDICT` |  `100` | inteiro maior que zero | Limite aproximado de tokens gerados |
+| `OLLAMA_TOP_P`       |  `1.0` | `0.0` a `1.0`          | Diversidade acumulada da amostragem |
+
+Na interface Streamlit, os mesmos controles estão disponíveis na barra lateral:
+
+- Temperatura;
+- Limite de tokens;
+- Top P.
+
+A chave `OLLAMA_API_KEY` continua sendo lida apenas do ambiente e nunca aparece na interface ou nos registros.
+
+## Registro seguro de execução
+
+A aplicação grava metadados em:
+
+- `/persistent/execucoes.json` no container;
+- `logs/execucoes.json` quando o diretório persistente não está disponível.
+
+Cada registro contém apenas timestamp, evento, status e nome do modelo. O registro não contém texto enviado, resposta, chave, token, endereço pessoal ou conteúdo de credencial.
+
+Os arquivos anteriores de histórico da interface podem conter anotações e respostas e devem ser tratados como dados sensíveis. Use o diretório `/persistent` conforme necessário.
+
+## Versões documentadas
+
+- Python: 3.11 ou superior;
+- Docker base: `python:3.11-slim`;
+- Streamlit: `1.67.0`;
+- Requests: `2.34.2`;
+- Ollama: API compatível com `/api/tags` e `/api/chat`.
+
+Para reproduzir o ambiente, sempre use um ambiente virtual novo e instale somente `requirements.txt`.
+
+## Validação em ambiente limpo
+
+Uma validação final deve ser feita em um ambiente virtual vazio:
+
+```powershell
+python -m venv .venv-clean
+.\.venv-clean\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python -m unittest -v
+python -m py_compile main.py app.py execution_log.py test_main.py
+```
+
+Sem acesso ao LLM, use os testes simulados. Para demonstrar o funcionamento real, configure `OLLAMA_HOST` e `OLLAMA_MODEL` e execute `python main.py` com uma entrada válida.
+
+## Registro de validação
+
+- Ambiente usado no desenvolvimento: Windows com Python 3.14 para o editor e Docker com Python 3.11.
+- Resultado dos testes locais: os testes do módulo `test_main.py` passaram sem chamada externa.
+- Problema observado durante a evolução intermediária: a versão inicial do repositório não continha o fluxo CLI `main.py` e o projeto precisava ser integrado ao histórico remoto existente.
+- Correção: o histórico foi integrado com uma pull request/merge, o fluxo foi separado em funções e o arquivo foi publicado na branch principal.

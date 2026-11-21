@@ -6,3 +6,6 @@ venv/
 *.tmp
 *.tar
 .persistent/
+.env
+.env.*
+!.env.example

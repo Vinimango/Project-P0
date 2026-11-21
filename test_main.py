@@ -26,6 +26,27 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(main.ConfigurationError):
             main.load_configuration(env)
 
+    def test_generation_parameters_are_loaded(self):
+        env = {
+            "OLLAMA_HOST": "https://llm-internal.softex:9001",
+            "OLLAMA_MODEL": "qwen3.5",
+            "OLLAMA_TEMPERATURE": "0.25",
+            "OLLAMA_NUM_PREDICT": "150",
+            "OLLAMA_TOP_P": "0.8",
+        }
+        config = main.load_configuration(env)
+        self.assertEqual(config.temperature, 0.25)
+        self.assertEqual(config.num_predict, 150)
+        self.assertEqual(config.top_p, 0.8)
+
+    def test_invalid_generation_parameters_are_rejected(self):
+        env = {
+            "OLLAMA_HOST": "https://llm-internal.softex:9001",
+            "OLLAMA_TEMPERATURE": "3",
+        }
+        with self.assertRaises(main.ConfigurationError):
+            main.load_configuration(env)
+
 
 class AuthenticationAndResponseTests(unittest.TestCase):
     def setUp(self):
@@ -35,6 +56,9 @@ class AuthenticationAndResponseTests(unittest.TestCase):
             api_key="simulated-key",
             require_auth=True,
             timeout_seconds=300,
+            temperature=0.1,
+            num_predict=100,
+            top_p=1.0,
         )
 
     @patch("main.requests.post")
@@ -80,6 +104,13 @@ class AuthenticationAndResponseTests(unittest.TestCase):
             main.parse_response(payload),
             "# Resumo Executivo\nTeste",
         )
+
+    def test_request_contains_generation_parameters(self):
+        payload = main.prepare_chat_request(self.config, "Notas da reunião")
+        self.assertEqual(payload["stream"], False)
+        self.assertEqual(payload["options"]["temperature"], 0.1)
+        self.assertEqual(payload["options"]["num_predict"], 100)
+        self.assertEqual(payload["options"]["top_p"], 1.0)
 
 
 if __name__ == "__main__":

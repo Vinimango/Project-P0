@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import dataclass
 
 import requests
 import urllib3
@@ -7,11 +8,8 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "https://llm-internal.softex:9001",
-).rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5")
+DEFAULT_OLLAMA_HOST = "https://llm-internal.softex:9001"
+DEFAULT_OLLAMA_MODEL = "qwen3.5"
 
 SYSTEM_PROMPT = """Você é um assistente especializado em transformar anotações soltas e desorganizadas de reuniões ou aulas em conteúdo claro e útil.
 
@@ -24,89 +22,224 @@ Organize a resposta em português do Brasil com:
 Não invente informações ausentes e preserve nomes, datas e prazos explicitamente mencionados."""
 
 
-def fetch_model() -> str:
-    """Busca o modelo configurado ou o primeiro modelo disponível no Ollama."""
+class ConfigurationError(Exception):
+    pass
+
+
+class EmptyInputError(Exception):
+    pass
+
+
+class AuthenticationError(Exception):
+    pass
+
+
+class LLMUnavailableError(Exception):
+    pass
+
+
+class CommunicationError(Exception):
+    pass
+
+
+class ResponseFormatError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Config:
+    host: str
+    model: str
+    api_key: str | None
+    require_auth: bool
+    timeout_seconds: float
+
+
+def load_configuration(environ: dict | None = None) -> Config:
+    """Responsabilidade: carregar e validar as configurações do ambiente."""
+    env = os.environ if environ is None else environ
+    host = env.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST).strip().rstrip("/")
+    model = env.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip()
+    api_key = env.get("OLLAMA_API_KEY", "").strip() or None
+
+    require_auth = env.get("OLLAMA_REQUIRE_AUTH", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
     try:
-        response = requests.get(
-            f"{OLLAMA_HOST}/api/tags",
-            verify=False,
-            timeout=15,
+        timeout_seconds = float(env.get("OLLAMA_TIMEOUT", "300"))
+    except ValueError as exc:
+        raise ConfigurationError(
+            "OLLAMA_TIMEOUT deve ser um número que representa os segundos."
+        ) from exc
+
+    if not host:
+        raise ConfigurationError("OLLAMA_HOST está vazio.")
+    if not host.startswith(("http://", "https://")):
+        raise ConfigurationError(
+            "OLLAMA_HOST inválido. Use um endereço começando com http:// ou https://."
         )
-        response.raise_for_status()
-        models = response.json().get("models", [])
+    if not model:
+        raise ConfigurationError("OLLAMA_MODEL está vazio.")
+    if timeout_seconds <= 0:
+        raise ConfigurationError("OLLAMA_TIMEOUT deve ser maior que zero.")
+    if require_auth and not api_key:
+        raise AuthenticationError(
+            "Autenticação solicitada, mas OLLAMA_API_KEY não foi configurada."
+        )
 
-        if any(model.get("name") == OLLAMA_MODEL for model in models):
-            return OLLAMA_MODEL
-
-        available = [model["name"] for model in models if model.get("name")]
-        if available:
-            print(f"Modelo '{OLLAMA_MODEL}' não encontrado. Usando '{available[0]}'.")
-            return available[0]
-    except (requests.RequestException, ValueError):
-        pass
-
-    print(f"Não foi possível consultar os modelos. Usando '{OLLAMA_MODEL}'.")
-    return OLLAMA_MODEL
+    return Config(host, model, api_key, require_auth, timeout_seconds)
 
 
-def generate_summary(model: str, text: str) -> str:
-    """Envia as anotações ao Ollama e retorna o conteúdo gerado."""
-    response = requests.post(
-        f"{OLLAMA_HOST}/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.1},
-        },
-        verify=False,
-        timeout=300,
-    )
-    response.raise_for_status()
-
-    message = response.json().get("message", {})
-    answer = message.get("content", "").strip()
-    if not answer:
-        raise RuntimeError("O modelo não retornou conteúdo.")
-    return answer
-
-
-def read_text_from_terminal() -> str:
-    """Lê texto multilinha; o usuário finaliza com uma linha vazia."""
+def capture_text(input_function=input) -> str:
+    """Responsabilidade: receber a entrada pelo terminal."""
     print("Cole suas anotações abaixo.")
     print("Finalize enviando uma linha vazia:")
 
     lines = []
-    while True:
-        line = input()
-        if not line:
-            break
-        lines.append(line)
+    try:
+        while True:
+            line = input_function()
+            if not line:
+                break
+            lines.append(line)
+    except EOFError as exc:
+        raise EmptyInputError(
+            "Nenhuma anotação foi informada antes do fim da entrada."
+        ) from exc
 
-    return "\n".join(lines).strip()
+    text = "\n".join(lines).strip()
+    if not text:
+        raise EmptyInputError(
+            "Nenhuma anotação foi informada. Cole um texto antes de processar."
+        )
+    return text
+
+
+def prepare_chat_request(config: Config, text: str) -> dict:
+    """Responsabilidade: preparar o corpo da solicitação ao Ollama."""
+    return {
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.1},
+    }
+
+
+def prepare_headers(config: Config) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
+    return headers
+
+
+def call_llm(config: Config, payload: dict) -> dict:
+    """Responsabilidade: realizar a comunicação HTTP e traduzir falhas previsíveis."""
+    try:
+        response = requests.post(
+            f"{config.host}/api/chat",
+            json=payload,
+            headers=prepare_headers(config),
+            verify=False,
+            timeout=config.timeout_seconds,
+        )
+    except requests.Timeout as exc:
+        raise CommunicationError(
+            f"O modelo demorou mais que {config.timeout_seconds:g} segundos para responder. "
+            "Tente novamente; se continuar, consulte a equipe técnica responsável pelo Ollama."
+        ) from exc
+    except requests.ConnectionError as exc:
+        raise CommunicationError(
+            f"Não foi possível conectar ao servidor Ollama em {config.host}. "
+            "Verifique a rede e a disponibilidade do serviço."
+        ) from exc
+    except requests.RequestException as exc:
+        raise CommunicationError(
+            "Ocorreu uma falha ao comunicar com o serviço Ollama."
+        ) from exc
+
+    if response.status_code in (401, 403):
+        raise AuthenticationError(
+            "A credencial foi rejeitada pelo serviço Ollama. "
+            "Confirme OLLAMA_API_KEY e a autenticação exigida pelo servidor."
+        )
+    if response.status_code == 404:
+        raise LLMUnavailableError(
+            f"O modelo ou o endereço '{config.model}' não está disponível. "
+            "Confirme OLLAMA_HOST e o nome do modelo."
+        )
+    if response.status_code == 429:
+        raise LLMUnavailableError(
+            "O serviço Ollama está limitando solicitações temporariamente. Aguarde e tente novamente."
+        )
+    if response.status_code >= 500:
+        raise LLMUnavailableError(
+            "O serviço Ollama está indisponível no momento. "
+            "Tente novamente mais tarde; a recuperação da infraestrutura é responsabilidade da equipe técnica."
+        )
+    if response.status_code >= 400:
+        raise CommunicationError(
+            f"O Ollama rejeitou a solicitação com o status HTTP {response.status_code}."
+        )
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ResponseFormatError(
+            "O Ollama respondeu, mas não enviou uma resposta JSON válida."
+        ) from exc
+
+
+def parse_response(payload: dict) -> str:
+    """Responsabilidade: validar e extrair a resposta esperada."""
+    if not isinstance(payload, dict):
+        raise ResponseFormatError("A resposta do Ollama deve ser um objeto JSON.")
+
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise ResponseFormatError(
+            "A resposta não contém o campo 'message' no formato esperado."
+        )
+
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ResponseFormatError(
+            "O modelo respondeu, mas o campo de conteúdo está vazio ou possui formato inesperado."
+        )
+    return content.strip()
+
+
+def present_result(result: str) -> None:
+    """Responsabilidade: apresentar somente o resultado útil ao usuário."""
+    print("\n--- Resumo gerado pelo modelo ---\n")
+    print(result)
 
 
 def main() -> int:
-    text = read_text_from_terminal()
-    if not text:
-        print("Erro: nenhuma anotação foi fornecida.", file=sys.stderr)
-        return 1
-
     try:
-        model = fetch_model()
-        print(f"\nProcessando com o modelo '{model}'...\n")
-        result = generate_summary(model, text)
-        print(result)
+        config = load_configuration()
+        text = capture_text()
+        payload = prepare_chat_request(config, text)
+        response_payload = call_llm(config, payload)
+        result = parse_response(response_payload)
+        present_result(result)
         return 0
-    except requests.RequestException as exc:
-        print(f"Erro ao comunicar com o Ollama: {exc}", file=sys.stderr)
+    except (
+        ConfigurationError,
+        EmptyInputError,
+        AuthenticationError,
+        LLMUnavailableError,
+        CommunicationError,
+        ResponseFormatError,
+    ) as exc:
+        print(f"Erro: {exc}", file=sys.stderr)
         return 1
-    except (RuntimeError, ValueError) as exc:
-        print(f"Erro ao processar a resposta: {exc}", file=sys.stderr)
-        return 1
+    except KeyboardInterrupt:
+        print("\nOperação cancelada pelo usuário.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
